@@ -1,5 +1,5 @@
 import multiprocessing as mp
-from time import time
+from time import time, sleep
 import sys
 import argparse
 
@@ -10,8 +10,8 @@ import operator
 import threading
 
 #For Pose Estimation
-from src import util
-from src.body import Body
+'''from src import util
+from src.body import Body'''
 import copy
 
 model_filename = 'model_data/models/mars-small128.pb'
@@ -61,7 +61,7 @@ class ObjectDetection:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         #pose estimation initialization
-        self.body_estimation = Body('model/body_pose_model.pth')
+        #self.body_estimation = Body('model/body_pose_model.pth')
         print("Using Device: ", self.device)
 
     def get_video_capture(self):
@@ -176,9 +176,11 @@ class ObjectDetection:
         global reid
         global FeatsLock
 
-        cap = cv2.VideoCapture()
-        cap.open("http://{}/video".format(url))
-        #cap = cv2.VideoCapture(0)
+        if url == "0":
+            cap = cv2.VideoCapture(0)
+        else:
+            cap = cv2.VideoCapture()
+            cap.open("http://{}/video".format(url))
         assert cap.isOpened()
 
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -187,6 +189,10 @@ class ObjectDetection:
         
         images_by_id[device] = {}
         frame_cnt = 0
+
+        if device > 0:
+            #Gives time to the first camera to gather features
+            sleep(60)
 
         print("Starting inference on device ", device)
         while True:
@@ -232,6 +238,11 @@ class ObjectDetection:
             print("IDs per frame: ", ids_per_frame)
         
             for i in images_by_id[device]:
+                if len(images_by_id[device][i]) > 100:
+                    #To save RAM
+                    print("Exceeded 100 images, removing now")
+                    del images_by_id[device][i][-1:-101:-1]
+
                 self.images_queue_shared.put([i, frame_cnt, images_by_id[device][i]])
 
             FeatsLock.acquire()
@@ -253,7 +264,7 @@ class ObjectDetection:
                             dis = []
                             print("Started collecting with NEW ids")
                             t = time()
-                            if not nid in local_feats_dict.keys() or local_feats_dict.shape[0] < 10:
+                            if not nid in local_feats_dict.keys() or local_feats_dict.shape[0] < 20:
                                 exist_ids.add(nid)
                                 if nid in local_feats_dict.keys():
                                     print("Not enough feats: {}, ID: {}".format(local_feats_dict[nid].shape[0], nid))
@@ -302,7 +313,7 @@ class ObjectDetection:
                     for current_ids in ids_per_frame:
                         for f in current_ids:
                             if str(i) == str(f) or str(idx) == str(f):
-                                run_pose_estimation = True
+                                #run_pose_estimation = True
                                 text_scale, text_thickness, line_thickness = get_FrameLabels(frame)
                                 _idx = int(idx[idx.find('_') + 1: :])
                                 detection_track = track_cnt[f][0]
@@ -310,9 +321,9 @@ class ObjectDetection:
                                 cv2_addBox(_idx, frame, detection_track[1], detection_track[2], detection_track[3], detection_track[4], line_thickness, text_thickness, text_scale)
             del ids_per_frame[:]
 
-            if run_pose_estimation:
+            '''if run_pose_estimation:
                 candidate, subset = self.body_estimation(frame_without_boxes)
-                frame = util.draw_bodypose(frame, candidate, subset)
+                frame = util.draw_bodypose(frame, candidate, subset)'''
 
             fps = 1/np.round(time() - start_time, 2)
 
@@ -332,6 +343,8 @@ def extract_features(feats, q, f_lock) -> None:
         print("Feature extraction subprocess has started")
         l_dict = dict()
         while True:
+            t = time()
+            print("Here  --------")
             if not q.empty():
                 id, cnt, img = q.get()
 
@@ -346,6 +359,7 @@ def extract_features(feats, q, f_lock) -> None:
                 feats[id] = f
                 f_lock.release()
                 print("Succesfully extracted features of images with ID: ", id)
+            print("Fin--------", time() - t)
             
 import warnings
 warnings.filterwarnings('ignore')
