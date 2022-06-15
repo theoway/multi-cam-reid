@@ -244,6 +244,8 @@ class ObjectDetection:
                     del images_by_id[device][i][:20:]
 
                 self.images_queue_shared.put([i, frame_cnt, images_by_id[device][i]])
+            print("Images loaded from stream to shared dict")
+            #sleep(3)
 
             FeatsLock.acquire()
             local_feats_dict = {}
@@ -344,13 +346,15 @@ def extract_features(feats, q, f_lock) -> None:
         l_dict = dict()
         while True:
             t = time()
-            print("Here  --------")
             if not q.empty():
                 id, cnt, img = q.get()
-
+                print("Cnt: ", cnt, " ID: ", id)
                 if id in l_dict.keys():
                     if l_dict[id][0] < cnt:
                         l_dict[id] = [cnt, img]
+                    else:
+                        #print("Skipping")
+                        continue
                 else:
                     l_dict[id] = [cnt, img]
 
@@ -359,7 +363,6 @@ def extract_features(feats, q, f_lock) -> None:
                 feats[id] = f
                 f_lock.release()
                 print("Succesfully extracted features of images with ID: ", id)
-            print("Fin--------", time() - t)
             
 import warnings
 warnings.filterwarnings('ignore')
