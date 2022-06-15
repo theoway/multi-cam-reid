@@ -235,13 +235,13 @@ class ObjectDetection:
                     idx = int(ids[ids.find('_') + 1: :])
             if len(tmp_ids) > 0:
                 ids_per_frame.append(set(tmp_ids))
-            print("IDs per frame: ", ids_per_frame)
+            #print("IDs per frame: ", ids_per_frame)
         
             for i in images_by_id[device]:
                 if len(images_by_id[device][i]) > 100:
                     #To save RAM
-                    print("Exceeded 100 images, removing now")
-                    del images_by_id[device][i][-1:-101:-1]
+                    #print("Exceeded 100 images, removing now")
+                    del images_by_id[device][i][:20:]
 
                 self.images_queue_shared.put([i, frame_cnt, images_by_id[device][i]])
 
@@ -258,7 +258,7 @@ class ObjectDetection:
                             final_fuse_id[i] = [i]
                         exist_ids = exist_ids or f
                     else:
-                        print("Exist IDs: ", exist_ids)
+                        #print("Exist IDs: ", exist_ids)
                         new_ids = f - exist_ids
                         for nid in new_ids:
                             dis = []
