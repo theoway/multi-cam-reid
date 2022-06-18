@@ -403,6 +403,7 @@ if __name__ == "__main__":
         detector(p_urls=urls)
     except Exception as e:
         print("Error occured: ", e)
+        raise
     finally:
         extract_p.terminate()
         extract_p.join()
