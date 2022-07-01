@@ -10,8 +10,8 @@ import operator
 import threading
 
 #For Pose Estimation
-'''from src import util
-from src.body import Body'''
+from src import util
+from src.body import Body
 import copy
 
 model_filename = 'model_data/models/mars-small128.pb'
@@ -60,8 +60,8 @@ class ObjectDetection:
         self.classes = self.model.names
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-        #pose estimation initialization
-        #self.body_estimation = Body('model/body_pose_model.pth')
+        #Pose estimation initialization
+        self.body_estimation = Body('model/body_pose_model.pth')
         print("Using Device: ", self.device)
 
     def get_video_capture(self):
@@ -77,7 +77,7 @@ class ObjectDetection:
         Loads Yolo5 model from pytorch hub.
         :return: Trained Pytorch model.
         """
-        model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+        model = torch.hub.load('ultralytics/yolov5', 'custom', path='.\crowdhuman_yolov5m.pt', force_reload=True)
         model.classes = [0]
         return model
 
@@ -181,6 +181,7 @@ class ObjectDetection:
         else:
             cap = cv2.VideoCapture()
             cap.open("http://{}/video".format(url))
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         assert cap.isOpened()
 
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -235,17 +236,15 @@ class ObjectDetection:
                     idx = int(ids[ids.find('_') + 1: :])
             if len(tmp_ids) > 0:
                 ids_per_frame.append(set(tmp_ids))
-            #print("IDs per frame: ", ids_per_frame)
+            print("IDs per frame: ", ids_per_frame)
+            sleep(1)
         
             for i in images_by_id[device]:
                 if len(images_by_id[device][i]) > 100:
-                    #To save RAM
-                    #print("Exceeded 100 images, removing now")
+                    #To reduce memory consumption
                     del images_by_id[device][i][:20:]
 
                 self.images_queue_shared.put([i, frame_cnt, images_by_id[device][i]])
-            print("Images loaded from stream to shared dict")
-            #sleep(3)
 
             FeatsLock.acquire()
             local_feats_dict = {}
@@ -315,17 +314,17 @@ class ObjectDetection:
                     for current_ids in ids_per_frame:
                         for f in current_ids:
                             if str(i) == str(f) or str(idx) == str(f):
-                                #run_pose_estimation = True
+                                #Only drawing the bounding box and detecting pose when match between subID and mainID is found
+                                run_pose_estimation = True
                                 text_scale, text_thickness, line_thickness = get_FrameLabels(frame)
                                 _idx = int(idx[idx.find('_') + 1: :])
                                 detection_track = track_cnt[f][0]
-                                #print("IDs Matched: ", f)
                                 cv2_addBox(_idx, frame, detection_track[1], detection_track[2], detection_track[3], detection_track[4], line_thickness, text_thickness, text_scale)
             del ids_per_frame[:]
 
-            '''if run_pose_estimation:
+            if run_pose_estimation:
                 candidate, subset = self.body_estimation(frame_without_boxes)
-                frame = util.draw_bodypose(frame, candidate, subset)'''
+                frame = util.draw_bodypose(frame, candidate, subset)
 
             fps = 1/np.round(time() - start_time, 2)
 
@@ -340,29 +339,31 @@ class ObjectDetection:
         cap.release()
 
 def extract_features(feats, q, f_lock) -> None:
-        from reid import REID
-        reid = REID()
-        print("Feature extraction subprocess has started")
-        l_dict = dict()
-        while True:
-            t = time()
-            if not q.empty():
-                id, cnt, img = q.get()
-                print("Cnt: ", cnt, " ID: ", id)
-                if id in l_dict.keys():
-                    if l_dict[id][0] < cnt:
-                        l_dict[id] = [cnt, img]
-                    else:
-                        #print("Skipping")
-                        continue
-                else:
+    '''
+    Receives images from the threads of detected persons and extracts features and adds to shared dictionary
+    '''
+    from reid import REID
+    reid = REID()
+    print("Feature extraction subprocess has started")
+    l_dict = dict()
+    while True:
+        t = time()
+        if not q.empty():
+            id, cnt, img = q.get()
+            print("Cnt: ", cnt, " ID: ", id)
+            if id in l_dict.keys():
+                if l_dict[id][0] < cnt:
                     l_dict[id] = [cnt, img]
+                else:
+                    continue
+            else:
+                l_dict[id] = [cnt, img]
 
-                f = reid._features(l_dict[id][1])
-                f_lock.acquire()
-                feats[id] = f
-                f_lock.release()
-                print("Succesfully extracted features of images with ID: ", id)
+            f = reid._features(l_dict[id][1])
+            f_lock.acquire()
+            feats[id] = f
+            f_lock.release()
+            print("Succesfully extracted features of images with ID: ", id)
             
 import warnings
 warnings.filterwarnings('ignore')
