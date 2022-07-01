@@ -7,6 +7,7 @@ This projects uses RTSP from multiple cameras and tracks people with in it, also
 - Download this [model data](https://github.com/samihormi/Multi-Camera-Person-Tracking-and-Re-Identification) folder and it to your local repo with the same name.
 - Download this [model](https://drive.google.com/file/d/1EtkBARD398UW93HwiVO9x3mByr0AeWMg/view?usp=sharing) and add it to `model_data/models/`
 - Download the [body_pose_model.pth](https://drive.google.com/drive/folders/1JsvI4M4ZTg98fmnCZLFM-3TeovnCRElG). Create a folder and name it `model`. Add the downloaded body pose model there.
+- Download the [crowdhuman_yolov5m.pt](https://drive.google.com/file/d/1gglIwqxaH2iTvy6lZlXuAcMpd_U0GCUb/view) and add it to the root repo folder.
 - Run `pip install -r requirements.txt`
 
 ### Running the code:
