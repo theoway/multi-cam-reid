@@ -11,9 +11,9 @@ This projects uses RTSP from multiple cameras and tracks people with in it, also
 - Run `pip install -r requirements.txt`
 
 ### Running the code:
-- To run the code with multiple RTSP feeds: `python demo.py -u host1:port1 host2:port2 ...` \
+- To run the code with multiple RTSP feeds: `python reidentifier.py -u host1:port1 host2:port2 ...` \
   _(*No need to prefix http/https with host names)_
-- To debug the app and use computer webcam: `python demo.py -u 0`
+- To debug the app and use computer webcam: `python reidentifier.py -u 0`
 
 ### Results and performance:
 
