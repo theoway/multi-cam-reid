@@ -1,3 +1,5 @@
+import copy
+
 import multiprocessing as mp
 from time import time, sleep
 import sys
@@ -10,9 +12,8 @@ import operator
 import threading
 
 #For Pose Estimation
-from src import util
-from src.body import Body
-import copy
+'''from src import util
+from src.body import Body'''
 
 model_filename = 'model_data/models/mars-small128.pb'
 from tools import generate_detections as gdet
@@ -61,7 +62,7 @@ class ObjectDetection:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         #Pose estimation initialization
-        self.body_estimation = Body('model/body_pose_model.pth')
+        #self.body_estimation = Body('model/body_pose_model.pth')
         print("Using Device: ", self.device)
 
     def get_video_capture(self):
@@ -93,35 +94,7 @@ class ObjectDetection:
         labels, cord = results.xyxyn[0][:, -1], results.xyxyn[0][:, :-1]
         return labels, cord
 
-    def class_to_label(self, x):
-        """
-        For a given label value, return corresponding string label.
-        :param x: numeric label
-        :return: corresponding string label
-        """
-        return self.classes[int(x)]
-
-    def plot_boxes(self, results, frame):
-        """
-        Takes a frame and its results as input, and plots the bounding boxes and label on to the frame.
-        :param results: contains labels and coordinates predicted by model on the given frame.
-        :param frame: Frame which has been scored.
-        :return: Frame with bounding boxes and labels ploted on it.
-        """
-        labels, cord = results
-        n = len(labels)
-        x_shape, y_shape = frame.shape[1], frame.shape[0]
-        for i in range(n):
-            row = cord[i]
-            if row[4] >= 0.2:
-                x1, y1, x2, y2 = int(row[0]*x_shape), int(row[1]*y_shape), int(row[2]*x_shape), int(row[3]*y_shape)
-                bgr = (0, 255, 0)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), bgr, 2)
-                cv2.putText(frame, self.class_to_label(labels[i]), (x1, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.9, bgr, 2)
-
-        return frame
-
-    def box_transform(self, box: list, shape: tuple):
+    def _box_transform(self, box: list, shape: tuple):
         """
         shape: (frame.shape[1], frame.shape[0])
         Return box with [top_x, top_y, w, h]
@@ -140,124 +113,66 @@ class ObjectDetection:
 
         return [x, y, w, h]
 
-
-    def __call__(self, p_urls):
-        """
-        This function is called when class is executed, it runs the loop to read the video frame by frame,
-        and write the output into a new file.
-        :return: void
-        """
-        threads = []
-        for id, url in enumerate(p_urls):
-            t = threading.Thread(target=self._reid_inference, args=(id, url, ))
-            threads.append(t)
-            t.start()
-        
-        for thread in threads:
-            thread.join() 
-
-    def _reid_inference(self, device, url):
-        """
-        This function is called when class is executed, it runs the loop to read the video frame by frame,
-        and displays the output frame with ids and poses.
-        :return: void
-        """
+    def inference(self, video_id, frame, h, w, frame_cnt, p_images_by_id, p_threshold, p_exist_ids, p_final_fuse_id, p_reid, p_FeatsLock, p_tracker):
         from deep_sort.detection import Detection
-        from deep_sort.tracker import Tracker
-        from deep_sort import nn_matching
-        metric = nn_matching.NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget)
-        tracker = Tracker(metric, max_age=100)
 
-
-        global images_by_id
-        global threshold
-        global exist_ids
-        global final_fuse_id
-        global reid
-        global FeatsLock
-
-        if url == "0":
-            cap = cv2.VideoCapture(0)
-        else:
-            cap = cv2.VideoCapture()
-            cap.open("http://{}/video".format(url))
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        assert cap.isOpened()
-
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        id_prefix = str(device) + "_"
-        
-        images_by_id[device] = {}
-        frame_cnt = 0
-
-        if device > 0:
-            #Gives time to the first camera to gather features
-            sleep(60)
-
-        print("Starting inference on device ", device)
-        while True:
-            ids_per_frame = []
-            start_time = time()
+        results = self.score_frame(frame)
             
-            ret, frame = cap.read()
-            assert ret
-            
-            results = self.score_frame(frame)
-            
-            boxs = [self.box_transform(cords, (frame.shape[1], frame.shape[0])) for cords in results[1]] #[minx, miny, w, h]
+        boxs = [self._box_transform(cords, (frame.shape[1], frame.shape[0])) for cords in results[1]] #[minx, miny, w, h]
 
-            features = encoder(frame, boxs) # n * 128
-            detections = [Detection(bbox, 1.0, feature) for bbox, feature in zip(boxs, features)] # length = n
-            text_scale, text_thickness, line_thickness = get_FrameLabels(frame)
+        features = encoder(frame, boxs) # n * 128
+        detections = [Detection(bbox, 1.0, feature) for bbox, feature in zip(boxs, features)] # length = n
+        text_scale, text_thickness, line_thickness = get_FrameLabels(frame)
 
-            tracker.predict()
-            tracker.update(detections)
-            tmp_ids = []
+        p_tracker.predict()
+        p_tracker.update(detections)
+        tmp_ids = []
+        ids_per_frame = []
+        id_prefix = str(video_id) + "_"
 
-            track_cnt = dict()
-            frame_cnt += 1
-            for track in tracker.tracks:
-                if not track.is_confirmed() or track.time_since_update > 1:
-                    continue
+        track_cnt = dict()
+        frame_cnt += 1
+        for track in p_tracker.tracks:
+            if not track.is_confirmed() or track.time_since_update > 1:
+                continue
                     
-                bbox = track.to_tlbr()
-                area = (int(bbox[2]) - int(bbox[0])) * (int(bbox[3]) - int(bbox[1]))
-                ids = str(id_prefix + str(track.track_id))
+            bbox = track.to_tlbr()
+            area = (int(bbox[2]) - int(bbox[0])) * (int(bbox[3]) - int(bbox[1]))
+            ids = str(id_prefix + str(track.track_id))
 
-                if bbox[0] >= 0 and bbox[1] >= 0 and bbox[3] < h and bbox[2] < w:
-                    tmp_ids.append(ids)
-                    if ids not in images_by_id[device]:
-                        track_cnt[ids] = [[frame_cnt, int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]), area]]
-                        images_by_id[device][ids] = [frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])]]
-                    else:
-                        track_cnt[ids] = [[frame_cnt, int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]), area]]
-                        images_by_id[device][ids].append(frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])])
-                    idx = int(ids[ids.find('_') + 1: :])
+            if bbox[0] >= 0 and bbox[1] >= 0 and bbox[3] < h and bbox[2] < w:
+                tmp_ids.append(ids)
+                if ids not in images_by_id[video_id]:
+                    track_cnt[ids] = [[frame_cnt, int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]), area]]
+                    images_by_id[video_id][ids] = [frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])]]
+                else:
+                    track_cnt[ids] = [[frame_cnt, int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]), area]]
+                    images_by_id[video_id][ids].append(frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])])
+                idx = int(ids[ids.find('_') + 1: :])
             if len(tmp_ids) > 0:
                 ids_per_frame.append(set(tmp_ids))
             print("IDs per frame: ", ids_per_frame)
             sleep(1)
         
-            for i in images_by_id[device]:
-                if len(images_by_id[device][i]) > 100:
-                    #To reduce memory consumption
-                    del images_by_id[device][i][:20:]
+        for i in p_images_by_id[video_id]:
+            if len(p_images_by_id[video_id][i]) > 100:
+                #To reduce memory consumption
+                del p_images_by_id[video_id][i][:20:]
 
-                self.images_queue_shared.put([i, frame_cnt, images_by_id[device][i]])
+            self.images_queue_shared.put([i, frame_cnt, p_images_by_id[video_id][i]])
 
-            FeatsLock.acquire()
-            local_feats_dict = {}
-            for key, value in self.feats_dict_shared.items():
-                local_feats_dict[key] = copy.deepcopy(value)
-            FeatsLock.release()
+        p_FeatsLock.acquire()
+        local_feats_dict = {}
+        for key, value in self.feats_dict_shared.items():
+            local_feats_dict[key] = copy.deepcopy(value)
+        p_FeatsLock.release()
 
-            for f in ids_per_frame:
-                if f:
-                    if len(exist_ids) == 0:
-                        for i in f:
-                            final_fuse_id[i] = [i]
-                        exist_ids = exist_ids or f
+        for f in ids_per_frame:
+            if f:
+                if len(p_exist_ids) == 0:
+                    for i in f:
+                        p_final_fuse_id[i] = [i]
+                        p_exist_ids = p_exist_ids or f
                     else:
                         #print("Exist IDs: ", exist_ids)
                         new_ids = f - exist_ids
@@ -278,39 +193,36 @@ class ObjectDetection:
 
                         unpickable = []
                         for i in f:
-                            for key,item in final_fuse_id.items():
+                            for key,item in p_final_fuse_id.items():
                                 if i in item:
-                                    unpickable += final_fuse_id[key]
+                                    unpickable += p_final_fuse_id[key]
                         for left_out_id in f & (exist_ids - set(unpickable)):
                             dis = []
                             t = time()
                             if not left_out_id in local_feats_dict.keys() or local_feats_dict[left_out_id].shape[0] < 10:
                                 continue
-                            for main_id in final_fuse_id.keys():
-                                tmp = np.mean(reid.compute_distance(local_feats_dict[left_out_id], local_feats_dict[main_id]))
+                            for main_id in p_final_fuse_id.keys():
+                                tmp = np.mean(p_reid.compute_distance(local_feats_dict[left_out_id], local_feats_dict[main_id]))
                                 print('Left out {}, Main ID {}, tmp {}'.format(left_out_id, main_id, tmp))
                                 dis.append([main_id, tmp])
                             print("Finished reiding with old ids: ", time() - t)
                             if dis:
                                 dis.sort(key=operator.itemgetter(1))
                                 print("Closest match found b/w: ", dis[0][0], left_out_id, dis[0][1])
-                                if dis[0][1] < threshold:
+                                if dis[0][1] < p_threshold:
                                     print("Creating subIDs: ", dis[0][0], left_out_id, dis[0][1])
                                     combined_id = dis[0][0]
-                                    images_by_id[int(combined_id[0:combined_id.find('_'):])][combined_id] += images_by_id[int(left_out_id[0:left_out_id.find('_'):])][left_out_id]
-                                    final_fuse_id[combined_id].append(left_out_id)
+                                    p_images_by_id[int(combined_id[0:combined_id.find('_'):])][combined_id] += p_images_by_id[int(left_out_id[0:left_out_id.find('_'):])][left_out_id]
+                                    p_final_fuse_id[combined_id].append(left_out_id)
                                 else:
                                     print("New ID added: ", left_out_id)
-                                    final_fuse_id[left_out_id] = [left_out_id]
+                                    p_final_fuse_id[left_out_id] = [left_out_id]
                             else:
                                 print("New ID added: ", left_out_id)
-                                final_fuse_id[left_out_id] = [left_out_id]
+                                p_final_fuse_id[left_out_id] = [left_out_id]
 
-            frame_without_boxes = copy.deepcopy(frame)
-            #print('Final ids and their sub-ids:', final_fuse_id)
-            run_pose_estimation = False
-            for idx in final_fuse_id:
-                for i in final_fuse_id[idx]:
+        for idx in p_final_fuse_id:
+                for i in p_final_fuse_id[idx]:
                     for current_ids in ids_per_frame:
                         for f in current_ids:
                             if str(i) == str(f) or str(idx) == str(f):
@@ -320,23 +232,79 @@ class ObjectDetection:
                                 _idx = int(idx[idx.find('_') + 1: :])
                                 detection_track = track_cnt[f][0]
                                 cv2_addBox(_idx, frame, detection_track[1], detection_track[2], detection_track[3], detection_track[4], line_thickness, text_thickness, text_scale)
-            del ids_per_frame[:]
 
-            if run_pose_estimation:
-                candidate, subset = self.body_estimation(frame_without_boxes)
-                frame = util.draw_bodypose(frame, candidate, subset)
+        return frame_cnt
+
+    def _reid_inference(self, device, url):
+        """
+        This function is called when class is executed, it runs the loop to read the video frame by frame,
+        and displays the output frame with ids and poses.
+        :return: void
+        """
+        from deep_sort.tracker import Tracker
+        from deep_sort import nn_matching
+        metric = nn_matching.NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget)
+        tracker = Tracker(metric, max_age=100)
+
+        global images_by_id
+        global threshold
+        global exist_ids
+        global final_fuse_id
+        global reid
+        global FeatsLock
+
+        if url == "0":
+            cap = cv2.VideoCapture(0)
+        else:
+            cap = cv2.VideoCapture()
+            cap.open("http://{}/video".format(url))
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        assert cap.isOpened()
+
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        images_by_id[device] = {}
+        frame_cnt = 0
+
+        if device > 0:
+            #Gives time to the first camera to gather features
+            sleep(60)
+
+        print("Starting inference on device ", device)
+        while True:
+            start_time = time()
+            
+            ret, frame = cap.read()
+            assert ret
+            
+            #Reidentification inference running on frames of current device. Shares data with other device's inference thread for re-identification
+            frame_cnt = self.inference(device, frame, h, w, frame_cnt, images_by_id, threshold,
+            exist_ids, final_fuse_id, reid, FeatsLock, tracker)
 
             fps = 1/np.round(time() - start_time, 2)
-
             cv2.putText(frame, f'FPS: {int(fps)}', (20,70), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0,255,0), 2)
-
-            
             cv2.imshow('Device: {}'.format(device), frame)
  
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
                 
         cap.release()
+
+    def __call__(self, p_urls):
+        """
+        This function is called when class is executed, it runs the loop to read the video streams frame by frame,
+        and displays the frames with reidentified ids and bounding boxes.
+        :return: void
+        """
+        threads = []
+        for id, url in enumerate(p_urls):
+            t = threading.Thread(target=self._reid_inference, args=(id, url, ))
+            threads.append(t)
+            t.start()
+        
+        for thread in threads:
+            thread.join()
 
 def extract_features(feats, q, f_lock) -> None:
     '''
@@ -350,7 +318,6 @@ def extract_features(feats, q, f_lock) -> None:
         t = time()
         if not q.empty():
             id, cnt, img = q.get()
-            print("Cnt: ", cnt, " ID: ", id)
             if id in l_dict.keys():
                 if l_dict[id][0] < cnt:
                     l_dict[id] = [cnt, img]
