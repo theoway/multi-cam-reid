@@ -142,12 +142,12 @@ class ObjectDetection:
 
             if bbox[0] >= 0 and bbox[1] >= 0 and bbox[3] < h and bbox[2] < w:
                 tmp_ids.append(ids)
-                if ids not in images_by_id[video_id]:
+                if ids not in p_images_by_id[video_id]:
                     track_cnt[ids] = [[frame_cnt, int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]), area]]
-                    images_by_id[video_id][ids] = [frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])]]
+                    p_images_by_id[video_id][ids] = [frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])]]
                 else:
                     track_cnt[ids] = [[frame_cnt, int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]), area]]
-                    images_by_id[video_id][ids].append(frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])])
+                    p_images_by_id[video_id][ids].append(frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])])
                 idx = int(ids[ids.find('_') + 1: :])
             if len(tmp_ids) > 0:
                 ids_per_frame.append(set(tmp_ids))
@@ -175,13 +175,13 @@ class ObjectDetection:
                         p_exist_ids = p_exist_ids or f
                     else:
                         #print("Exist IDs: ", exist_ids)
-                        new_ids = f - exist_ids
+                        new_ids = f - p_exist_ids
                         for nid in new_ids:
                             dis = []
                             print("Started collecting with NEW ids")
                             t = time()
                             if not nid in local_feats_dict.keys() or local_feats_dict.shape[0] < 20:
-                                exist_ids.add(nid)
+                                p_exist_ids.add(nid)
                                 if nid in local_feats_dict.keys():
                                     print("Not enough feats: {}, ID: {}".format(local_feats_dict[nid].shape[0], nid))
                                 else:
@@ -196,7 +196,7 @@ class ObjectDetection:
                             for key,item in p_final_fuse_id.items():
                                 if i in item:
                                     unpickable += p_final_fuse_id[key]
-                        for left_out_id in f & (exist_ids - set(unpickable)):
+                        for left_out_id in f & (p_exist_ids - set(unpickable)):
                             dis = []
                             t = time()
                             if not left_out_id in local_feats_dict.keys() or local_feats_dict[left_out_id].shape[0] < 10:
@@ -299,7 +299,7 @@ class ObjectDetection:
         """
         threads = []
         for id, url in enumerate(p_urls):
-            t = threading.Thread(target=self._reid_inference, args=(id, url, ))
+            t = threading.Thread(target=self._reid_inference, args=(id, url,))
             threads.append(t)
             t.start()
         
