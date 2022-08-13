@@ -15,12 +15,16 @@ This projects uses RTSP from multiple cameras and tracks people with in it, also
   _(*No need to prefix http/https with host names)_
 - To debug the app and use computer webcam: `python reidentifier.py -u 0`
 
+### Testing the code:
+- `unittest` module has been used to for writing the testcases. The testcase checks if the extraction subprocess and inference process are running correctly. The inference process uses a test video found in `/tests/videos/`
+- To run the test: `python -m unittest -v tests.test_reid`
+
 ### Results and performance:
 
 https://user-images.githubusercontent.com/41969735/174279980-23926ae0-07fe-4213-85f7-f6e55e3d6a73.mp4
 
 
-On my setup (i5 8th gen, 8 Gb RAM and NVIDI GTX 1650), I got 10 fps without pose estimation and 2 fps with pose esimtation. With better hardware, it can be improved.
+On my setup(i5 8th gen, 8 Gb RAM and NVIDI GTX 1650) with low-resolution streams(**640 × 480**), I got 10 fps without pose estimation and 2 fps with pose esimtation. With better hardware, it can be improved.
 
 ### Contributing:
 - Raise an issue with mentioning the issue being faced, your system specifications along with OS and Python version
