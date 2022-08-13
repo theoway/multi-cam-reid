@@ -48,16 +48,28 @@ class ObjectDetection:
     Class implements Yolo5 model to make inferences on a youtube video using Opencv2.
     """
 
-    def __init__(self, capture_index, feats_dict_shared, images_queue_shared):
+    def __init__(self, feats_dict_shared, images_queue_shared, feat_dict_lock):
         """
         Initializes the class with youtube url and output file.
         :param url: Has to be as youtube URL,on which prediction is made.
         :param out_file: A valid output file name.
         """
-        self.capture_index = capture_index
         self.feats_dict_shared = feats_dict_shared
         self.images_queue_shared = images_queue_shared
-        self.model = self.load_model()
+        self.feat_dict_lock = feat_dict_lock
+        self.final_fuse_id = dict()
+        self.images_by_id = dict()
+        self.exist_ids = set()
+        #Controls the threshold for matching features
+        self.threshold = 300
+        self.reid = REID()
+
+        from deep_sort.tracker import Tracker
+        from deep_sort import nn_matching
+        metric = nn_matching.NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget)
+        self.tracker = Tracker(metric, max_age=100)
+
+        self.model = self._load_model()
         self.classes = self.model.names
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -65,15 +77,7 @@ class ObjectDetection:
         #self.body_estimation = Body('model/body_pose_model.pth')
         print("Using Device: ", self.device)
 
-    def get_video_capture(self):
-        """
-        Creates a new video streaming object to extract video frame by frame to make prediction on.
-        :return: opencv2 video capture object, with lowest quality frame available for video.
-        """
-      
-        return cv2.VideoCapture(self.capture_index)
-
-    def load_model(self):
+    def _load_model(self):
         """
         Loads Yolo5 model from pytorch hub.
         :return: Trained Pytorch model.
@@ -82,7 +86,7 @@ class ObjectDetection:
         model.classes = [0]
         return model
 
-    def score_frame(self, frame):
+    def _score_frame(self, frame):
         """
         Takes a single frame as input, and scores the frame using yolo5 model.
         :param frame: input frame in numpy/list/tuple format.
@@ -113,10 +117,10 @@ class ObjectDetection:
 
         return [x, y, w, h]
 
-    def inference(self, video_id, frame, h, w, frame_cnt, p_images_by_id, p_threshold, p_exist_ids, p_final_fuse_id, p_reid, p_FeatsLock, p_tracker):
+    def inference(self, video_id, frame, h, w, frame_cnt):
         from deep_sort.detection import Detection
 
-        results = self.score_frame(frame)
+        results = self._score_frame(frame)
             
         boxs = [self._box_transform(cords, (frame.shape[1], frame.shape[0])) for cords in results[1]] #[minx, miny, w, h]
 
@@ -124,15 +128,15 @@ class ObjectDetection:
         detections = [Detection(bbox, 1.0, feature) for bbox, feature in zip(boxs, features)] # length = n
         text_scale, text_thickness, line_thickness = get_FrameLabels(frame)
 
-        p_tracker.predict()
-        p_tracker.update(detections)
+        self.tracker.predict()
+        self.tracker.update(detections)
         tmp_ids = []
         ids_per_frame = []
         id_prefix = str(video_id) + "_"
 
         track_cnt = dict()
         frame_cnt += 1
-        for track in p_tracker.tracks:
+        for track in self.tracker.tracks:
             if not track.is_confirmed() or track.time_since_update > 1:
                 continue
                     
@@ -142,92 +146,92 @@ class ObjectDetection:
 
             if bbox[0] >= 0 and bbox[1] >= 0 and bbox[3] < h and bbox[2] < w:
                 tmp_ids.append(ids)
-                if ids not in p_images_by_id[video_id]:
+                if ids not in self.images_by_id[video_id]:
                     track_cnt[ids] = [[frame_cnt, int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]), area]]
-                    p_images_by_id[video_id][ids] = [frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])]]
+                    self.images_by_id[video_id][ids] = [frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])]]
                 else:
                     track_cnt[ids] = [[frame_cnt, int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]), area]]
-                    p_images_by_id[video_id][ids].append(frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])])
+                    self.images_by_id[video_id][ids].append(frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])])
                 idx = int(ids[ids.find('_') + 1: :])
             if len(tmp_ids) > 0:
                 ids_per_frame.append(set(tmp_ids))
             print("IDs per frame: ", ids_per_frame)
             sleep(1)
         
-        for i in p_images_by_id[video_id]:
-            if len(p_images_by_id[video_id][i]) > 100:
+        for i in self.images_by_id[video_id]:
+            if len(self.images_by_id[video_id][i]) > 100:
                 #To reduce memory consumption
-                del p_images_by_id[video_id][i][:20:]
+                del self.images_by_id[video_id][i][:20:]
 
-            self.images_queue_shared.put([i, frame_cnt, p_images_by_id[video_id][i]])
+            self.images_queue_shared.put([i, frame_cnt, self.images_by_id[video_id][i]])
 
-        p_FeatsLock.acquire()
+        self.feat_dict_lock.acquire()
         local_feats_dict = {}
         for key, value in self.feats_dict_shared.items():
             local_feats_dict[key] = copy.deepcopy(value)
-        p_FeatsLock.release()
+        self.feat_dict_lock.release()
 
+        min_num_of_features = 5
         for f in ids_per_frame:
             if f:
-                if len(p_exist_ids) == 0:
+                if len(self.exist_ids) == 0:
                     for i in f:
-                        p_final_fuse_id[i] = [i]
-                        p_exist_ids = p_exist_ids or f
-                    else:
-                        #print("Exist IDs: ", exist_ids)
-                        new_ids = f - p_exist_ids
-                        for nid in new_ids:
-                            dis = []
-                            print("Started collecting with NEW ids")
-                            t = time()
-                            if not nid in local_feats_dict.keys() or local_feats_dict.shape[0] < 20:
-                                p_exist_ids.add(nid)
-                                if nid in local_feats_dict.keys():
-                                    print("Not enough feats: {}, ID: {}".format(local_feats_dict[nid].shape[0], nid))
-                                else:
-                                    print("New ID to be extracted: {}".format(nid))
-                                continue
+                        self.final_fuse_id[i] = [i]
+                        self.exist_ids = self.exist_ids | f
+                else:
+                    new_ids = f - self.exist_ids
+                    for nid in new_ids:
+                        dis = []
+                        print("Started collecting with NEW ids")
+                        t = time()
+                        if not nid in local_feats_dict.keys() or local_feats_dict.shape[0] < min_num_of_features:
+                            self.exist_ids.add(nid)
+                            if nid in local_feats_dict.keys():
+                                print("Not enough feats: {}, ID: {}".format(local_feats_dict[nid].shape[0], nid))
                             else:
-                                pass
+                                print("New ID to be extracted: {}".format(nid))
+                            continue
+                        else:
+                            pass
                             print("finished collecting with NEW ids: ", time() - t)
 
-                        unpickable = []
-                        for i in f:
-                            for key,item in p_final_fuse_id.items():
-                                if i in item:
-                                    unpickable += p_final_fuse_id[key]
-                        for left_out_id in f & (p_exist_ids - set(unpickable)):
-                            dis = []
-                            t = time()
-                            if not left_out_id in local_feats_dict.keys() or local_feats_dict[left_out_id].shape[0] < 10:
-                                continue
-                            for main_id in p_final_fuse_id.keys():
-                                tmp = np.mean(p_reid.compute_distance(local_feats_dict[left_out_id], local_feats_dict[main_id]))
-                                print('Left out {}, Main ID {}, tmp {}'.format(left_out_id, main_id, tmp))
-                                dis.append([main_id, tmp])
-                            print("Finished reiding with old ids: ", time() - t)
-                            if dis:
-                                dis.sort(key=operator.itemgetter(1))
-                                print("Closest match found b/w: ", dis[0][0], left_out_id, dis[0][1])
-                                if dis[0][1] < p_threshold:
-                                    print("Creating subIDs: ", dis[0][0], left_out_id, dis[0][1])
-                                    combined_id = dis[0][0]
-                                    p_images_by_id[int(combined_id[0:combined_id.find('_'):])][combined_id] += p_images_by_id[int(left_out_id[0:left_out_id.find('_'):])][left_out_id]
-                                    p_final_fuse_id[combined_id].append(left_out_id)
-                                else:
-                                    print("New ID added: ", left_out_id)
-                                    p_final_fuse_id[left_out_id] = [left_out_id]
+                    unpickable = []
+                    for i in f:
+                        for key,item in self.final_fuse_id.items():
+                            if i in item:
+                                unpickable += self.final_fuse_id[key]
+
+                    for left_out_id in f & (self.exist_ids - set(unpickable)):
+                        dis = []
+                        t = time()
+                        if not left_out_id in local_feats_dict.keys() or local_feats_dict[left_out_id].shape[0] < min_num_of_features:
+                            continue
+                        for main_id in self.final_fuse_id.keys():
+                            tmp = np.mean(self.reid.compute_distance(local_feats_dict[left_out_id], local_feats_dict[main_id]))
+                            print('Left out {}, Main ID {}, tmp {}'.format(left_out_id, main_id, tmp))
+                            dis.append([main_id, tmp])
+                        print("Finished reiding with old ids: ", time() - t)
+                        if dis:
+                            dis.sort(key=operator.itemgetter(1))
+                            print("Closest match found b/w: ", dis[0][0], left_out_id, dis[0][1])
+                            if dis[0][1] < self.threshold:
+                                print("Creating subIDs: ", dis[0][0], left_out_id, dis[0][1])
+                                combined_id = dis[0][0]
+                                self.images_by_id[int(combined_id[0:combined_id.find('_'):])][combined_id] += self.images_by_id[int(left_out_id[0:left_out_id.find('_'):])][left_out_id]
+                                self.final_fuse_id[combined_id].append(left_out_id)
                             else:
                                 print("New ID added: ", left_out_id)
-                                p_final_fuse_id[left_out_id] = [left_out_id]
+                                self.final_fuse_id[left_out_id] = [left_out_id]
+                        else:
+                            print("New ID added: ", left_out_id)
+                            self.final_fuse_id[left_out_id] = [left_out_id]
 
-        for idx in p_final_fuse_id:
-                for i in p_final_fuse_id[idx]:
+        for idx in self.final_fuse_id:
+                for i in self.final_fuse_id[idx]:
                     for current_ids in ids_per_frame:
                         for f in current_ids:
                             if str(i) == str(f) or str(idx) == str(f):
                                 #Only drawing the bounding box and detecting pose when match between subID and mainID is found
-                                run_pose_estimation = True
                                 text_scale, text_thickness, line_thickness = get_FrameLabels(frame)
                                 _idx = int(idx[idx.find('_') + 1: :])
                                 detection_track = track_cnt[f][0]
@@ -235,24 +239,12 @@ class ObjectDetection:
 
         return frame_cnt
 
-    def _reid_inference(self, device, url):
+    def _reid_on_streams(self, device, url):
         """
         This function is called when class is executed, it runs the loop to read the video frame by frame,
         and displays the output frame with ids and poses.
         :return: void
         """
-        from deep_sort.tracker import Tracker
-        from deep_sort import nn_matching
-        metric = nn_matching.NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget)
-        tracker = Tracker(metric, max_age=100)
-
-        global images_by_id
-        global threshold
-        global exist_ids
-        global final_fuse_id
-        global reid
-        global FeatsLock
-
         if url == "0":
             cap = cv2.VideoCapture(0)
         else:
@@ -264,26 +256,21 @@ class ObjectDetection:
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        images_by_id[device] = {}
+        self.images_by_id[device] = {}
         frame_cnt = 0
 
         if device > 0:
             #Gives time to the first camera to gather features
-            sleep(60)
+            sleep(30)
 
         print("Starting inference on device ", device)
         while True:
-            start_time = time()
-            
             ret, frame = cap.read()
             assert ret
             
             #Reidentification inference running on frames of current device. Shares data with other device's inference thread for re-identification
-            frame_cnt = self.inference(device, frame, h, w, frame_cnt, images_by_id, threshold,
-            exist_ids, final_fuse_id, reid, FeatsLock, tracker)
+            frame_cnt = self.inference(device, frame, h, w, frame_cnt)
 
-            fps = 1/np.round(time() - start_time, 2)
-            cv2.putText(frame, f'FPS: {int(fps)}', (20,70), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0,255,0), 2)
             cv2.imshow('Device: {}'.format(device), frame)
  
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -299,7 +286,7 @@ class ObjectDetection:
         """
         threads = []
         for id, url in enumerate(p_urls):
-            t = threading.Thread(target=self._reid_inference, args=(id, url,))
+            t = threading.Thread(target=self._reid_on_streams, args=(id, url,))
             threads.append(t)
             t.start()
         
@@ -348,18 +335,9 @@ if __name__ == "__main__":
     parser.register('action', 'extend', ExtendAction)
     parser.add_argument('-u', '--urls', action="extend", nargs="+", type=str, help='add urls made of host and port')
     urls = parser.parse_args(args = sys.argv[1:]).urls
-    images_by_id = dict()
 
-    #Controls the threshold for matching features
-    threshold = 380
-    reid = REID()
-    #All the ids ever tracked are stored here
-    exist_ids = set()
-    #Contains sub-ids mapped to their main ids
-    final_fuse_id = dict()
-
+    #Using a queue, shared memory dictionary with lock between extraction subprocess and inference subprocess
     FeatsLock = mp.Lock()
-    #Using a shared memory dictionary between extraction subprocess and inference subprocess
     shared_feats_dict = mp.Manager().dict()
     shared_images_queue = mp.Queue()
 
@@ -367,7 +345,7 @@ if __name__ == "__main__":
     extract_p.start()
     
     try:
-        detector = ObjectDetection(0, shared_feats_dict, shared_images_queue)
+        detector = ObjectDetection(shared_feats_dict, shared_images_queue, FeatsLock)
         detector(p_urls=urls)
     except Exception as e:
         print("Error occured: ", e)

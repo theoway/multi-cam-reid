@@ -1,21 +1,9 @@
 import unittest
 
 from reidentifier import ObjectDetection, extract_features
-from reid import REID
-
 import multiprocessing as mp
-
 import cv2
 
-images_by_id = dict()
-#Controls the threshold for matching features
-threshold = 380
-reid = REID()
-#All the ids ever tracked are stored here
-exist_ids = set()
-#Contains sub-ids mapped to their main ids
-final_fuse_id = dict()
-#Shared dictionary for features
 feature_dict = mp.Manager().dict()
 #Lock for shared feature dictionary
 FeatsLock = mp.Lock()
@@ -32,27 +20,7 @@ class Testing(unittest.TestCase):
         return False
 
     def test_run_single_video_thread(self):
-        from deep_sort.tracker import Tracker
-        from deep_sort import nn_matching
-
         device = 0
-
-        #Definition of the parameters
-        max_cosine_distance = 0.2
-        nn_budget = None
-        metric = nn_matching.NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget)
-        tracker = Tracker(metric, max_age=100)
-
-        global images_by_id
-        images_by_id[device] = {}
-
-        global threshold
-        global exist_ids
-        global final_fuse_id
-        global reid
-        global FeatsLock
-        global queue
-        global feature_dict
 
         extract_prcoess = mp.Process(target=extract_features, args=(feature_dict, queue, FeatsLock,))
         extract_prcoess.start()
@@ -63,25 +31,25 @@ class Testing(unittest.TestCase):
         
         frame_cnt = 0
         try:
-            detector = ObjectDetection(0, feature_dict, queue)
-            
+            detector = ObjectDetection(feature_dict, queue, FeatsLock)
+            detector.images_by_id[device] = {}
+
             while cap.isOpened() and frame_cnt <= 15:
                 ret, frame = cap.read()
                 assert ret
 
-                frame_cnt = detector.inference(device, frame, h, w, frame_cnt, images_by_id, threshold, exist_ids, 
-                    final_fuse_id, reid, FeatsLock, tracker)
+                frame_cnt = detector.inference(device, frame, h, w, frame_cnt)
 
             cap.release()
 
-            print("IDs: ", final_fuse_id.keys())
+            print("IDs: ", detector.final_fuse_id)
         except Exception as e:
             print("Error: ", e)
             raise
         finally:
             extract_prcoess.terminate()
             queue.close()
-            self.assertTrue(self._validate_id_dict(final_fuse_id))
+            self.assertTrue(self._validate_id_dict(detector.final_fuse_id))
 
 if __name__ == "__main__":
     unittest.main(warnings='ignore')
