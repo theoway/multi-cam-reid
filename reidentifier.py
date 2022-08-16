@@ -1,9 +1,6 @@
 import copy
-
-import multiprocessing as mp
+import argparse, sys, multiprocessing as mp
 from time import time, sleep
-import sys
-import argparse
 
 import torch
 import cv2
@@ -11,12 +8,17 @@ import numpy as np
 import operator
 import threading
 
+from deep_sort.detection import Detection
+from tools import generate_detections as gdet
+
+from deep_sort.tracker import Tracker
+from deep_sort import nn_matching
+
 #For Pose Estimation
 '''from src import util
 from src.body import Body'''
 
 model_filename = 'model_data/models/mars-small128.pb'
-from tools import generate_detections as gdet
 encoder = gdet.create_box_encoder(model_filename,batch_size=1)
 
 #Definition of the parameters
@@ -45,27 +47,33 @@ def get_FrameLabels(frame):
 
 class ObjectDetection:
     """
-    Class implements Yolo5 model to make inferences on a youtube video using Opencv2.
+    Class implements Yolo5 model to make inferences and re-identify objects on live streams.
     """
 
     def __init__(self, feats_dict_shared, images_queue_shared, feat_dict_lock):
         """
-        Initializes the class with youtube url and output file.
-        :param url: Has to be as youtube URL,on which prediction is made.
-        :param out_file: A valid output file name.
+        Initializes the class with shared dictionaries to communicate between stream threads and helper subprocess
+        :param feats_dict_shared: A `multiprocessing.Manager().dict()` which is shared by this class's instances and `extract_feature` subrprocess
+        This dictionary is used to exchange object features between the processes.
+        :param images_queue_shared: A `multiprocessing.Queue()` which is shared by this class's instances and `extract_feature` subrprocess.
+        This queue is used to exchange images between the processes.
+        :param feat_dict_lock: A `multiprocessing.Lock()` which is shared by this class's instances and `extract_feature` subrprocess.
+        This lock prevents race condition during `feats_dict_shared` I/O.
         """
         self.feats_dict_shared = feats_dict_shared
         self.images_queue_shared = images_queue_shared
         self.feat_dict_lock = feat_dict_lock
+
+        #Stores the main ids along wiith their sub-ids
         self.final_fuse_id = dict()
+        #Stores images of the detected objects under their ids for each streaming device
         self.images_by_id = dict()
+        #Stores all the ids encountered during a session
         self.exist_ids = set()
         #Controls the threshold for matching features
         self.threshold = 300
         self.reid = REID()
 
-        from deep_sort.tracker import Tracker
-        from deep_sort import nn_matching
         metric = nn_matching.NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget)
         self.tracker = Tracker(metric, max_age=100)
 
@@ -74,7 +82,7 @@ class ObjectDetection:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         #Pose estimation initialization
-        #self.body_estimation = Body('model/body_pose_model.pth')
+        #self.body_estimation = Body('model_data/body_pose_model.pth')
         print("Using Device: ", self.device)
 
     def _load_model(self):
@@ -100,7 +108,8 @@ class ObjectDetection:
 
     def _box_transform(self, box: list, shape: tuple):
         """
-        shape: (frame.shape[1], frame.shape[0])
+        :param box: Takes the normalized coordinates of the bounding box output by YOLOv5.
+        :param shape: Takes the width and height of frame(frame.shape[1], frame.shape[0])
         Return box with [top_x, top_y, w, h]
         """
         x = int(box[0]*shape[0])
@@ -117,9 +126,15 @@ class ObjectDetection:
 
         return [x, y, w, h]
 
-    def inference(self, video_id, frame, h, w, frame_cnt):
-        from deep_sort.detection import Detection
-
+    def inference(self, video_id: int, frame: any, h: int, w: int, frame_cnt: int=0) -> int:
+        """
+        :param video_id: Takes an integer to differentiate between streams
+        :param frame: OpeCV frame
+        :param h: OpeCV frame height
+        :param w: OpeCV frame width
+        :param frame_cnt: Integer indicating the number of current frame
+        Return incremented frame_cnt
+        """
         results = self._score_frame(frame)
             
         boxs = [self._box_transform(cords, (frame.shape[1], frame.shape[0])) for cords in results[1]] #[minx, miny, w, h]
@@ -214,14 +229,16 @@ class ObjectDetection:
                         if dis:
                             dis.sort(key=operator.itemgetter(1))
                             print("Closest match found b/w: ", dis[0][0], left_out_id, dis[0][1])
-                            if dis[0][1] < self.threshold:
-                                print("Creating subIDs: ", dis[0][0], left_out_id, dis[0][1])
-                                combined_id = dis[0][0]
-                                self.images_by_id[int(combined_id[0:combined_id.find('_'):])][combined_id] += self.images_by_id[int(left_out_id[0:left_out_id.find('_'):])][left_out_id]
-                                self.final_fuse_id[combined_id].append(left_out_id)
-                            else:
-                                print("New ID added: ", left_out_id)
-                                self.final_fuse_id[left_out_id] = [left_out_id]
+                            for i in range(0, len(dis)):
+                                if dis[i][1] < self.threshold:
+                                    print("Creating subIDs: ", dis[i][0], left_out_id, dis[i][1])
+                                    combined_id = dis[i][0]
+                                    self.images_by_id[int(combined_id[0:combined_id.find('_'):])][combined_id] += self.images_by_id[int(left_out_id[0:left_out_id.find('_'):])][left_out_id]
+                                    self.final_fuse_id[combined_id].append(left_out_id)
+                                else:
+                                    print("New ID added: ", left_out_id)
+                                    self.final_fuse_id[left_out_id] = [left_out_id]
+                                    break
                         else:
                             print("New ID added: ", left_out_id)
                             self.final_fuse_id[left_out_id] = [left_out_id]
@@ -239,11 +256,16 @@ class ObjectDetection:
 
         return frame_cnt
 
-    def _reid_on_streams(self, device, url):
+    def _reid_on_streams(self, device: int=0, url: str=""):
         """
         This function is called when class is executed, it runs the loop to read the video frame by frame,
         and displays the output frame with ids and poses.
-        :return: void
+        :param device: An integer indicating the device number/id
+        :param url: Takes a string containing the url along with the port to receive the stream.
+        Example: url = "192.168.256.23:8080"
+        This will be embedded into an http endpoint: "http://192.168.256.23:8080/video"
+
+        :return: None
         """
         if url == "0":
             cap = cv2.VideoCapture(0)
@@ -278,11 +300,13 @@ class ObjectDetection:
                 
         cap.release()
 
-    def __call__(self, p_urls):
+    def __call__(self, p_urls: list=[]):
         """
         This function is called when class is executed, it runs the loop to read the video streams frame by frame,
         and displays the frames with reidentified ids and bounding boxes.
-        :return: void
+        :param p_urls:
+
+        :return: None
         """
         threads = []
         for id, url in enumerate(p_urls):
@@ -318,7 +342,8 @@ def extract_features(feats, q, f_lock) -> None:
             feats[id] = f
             f_lock.release()
             print("Succesfully extracted features of images with ID: ", id)
-            
+
+
 import warnings
 warnings.filterwarnings('ignore')
 
