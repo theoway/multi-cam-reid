@@ -14,6 +14,7 @@ This projects uses RTSP from multiple cameras and tracks people with in it, also
 - To run the code with multiple RTSP feeds: `python reidentifier.py -u host1:port1 host2:port2 ...` \
   _(*No need to prefix http/https with host names)_
 - To debug the app and use computer webcam: `python reidentifier.py -u 0`
+- To run pose estimation, use `-p` flag: `python reidentifier.py -p -u host1:port1 host2:port2 ...` or `python reidentifier.py -p -u 0`
 
 ### Testing the code:
 - `unittest` module has been used to for writing the testcases. The testcase checks if the extraction subprocess and inference process are running correctly. The inference process uses a test video found in `/tests/videos/`

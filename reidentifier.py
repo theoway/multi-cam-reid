@@ -15,8 +15,8 @@ from deep_sort.tracker import Tracker
 from deep_sort import nn_matching
 
 #For Pose Estimation
-'''from src import util
-from src.body import Body'''
+from src import util
+from src.body import Body
 
 model_filename = 'model_data/models/mars-small128.pb'
 encoder = gdet.create_box_encoder(model_filename,batch_size=1)
@@ -82,7 +82,7 @@ class ObjectDetection:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         #Pose estimation initialization
-        #self.body_estimation = Body('model_data/body_pose_model.pth')
+        self.body_estimation = Body('model_data/body_pose_model.pth')
         print("Using Device: ", self.device)
 
     def _load_model(self):
@@ -126,7 +126,7 @@ class ObjectDetection:
 
         return [x, y, w, h]
 
-    def inference(self, video_id: int, frame: any, h: int, w: int, frame_cnt: int=0) -> int:
+    def inference(self, video_id: int, frame: any, h: int, w: int, frame_cnt: int=0, estimate_pose :bool=False) -> int:
         """
         :param video_id: Takes an integer to differentiate between streams
         :param frame: OpeCV frame
@@ -170,11 +170,11 @@ class ObjectDetection:
                 idx = int(ids[ids.find('_') + 1: :])
             if len(tmp_ids) > 0:
                 ids_per_frame.append(set(tmp_ids))
-            print("IDs per frame: ", ids_per_frame)
+            #print("IDs per frame: ", ids_per_frame)
             sleep(1)
         
         for i in self.images_by_id[video_id]:
-            if len(self.images_by_id[video_id][i]) > 100:
+            if len(self.images_by_id[video_id][i]) > 70:
                 #To reduce memory consumption
                 del self.images_by_id[video_id][i][:20:]
 
@@ -186,7 +186,7 @@ class ObjectDetection:
             local_feats_dict[key] = copy.deepcopy(value)
         self.feat_dict_lock.release()
 
-        min_num_of_features = 5
+        min_num_of_features = 10
         for f in ids_per_frame:
             if f:
                 if len(self.exist_ids) == 0:
@@ -243,6 +243,10 @@ class ObjectDetection:
                             print("New ID added: ", left_out_id)
                             self.final_fuse_id[left_out_id] = [left_out_id]
 
+        if estimate_pose:
+            candidate, subset = self.body_estimation(frame)
+            frame = util.draw_bodypose(frame, candidate, subset)
+
         for idx in self.final_fuse_id:
                 for i in self.final_fuse_id[idx]:
                     for current_ids in ids_per_frame:
@@ -256,7 +260,7 @@ class ObjectDetection:
 
         return frame_cnt
 
-    def _reid_on_streams(self, device: int=0, url: str=""):
+    def _reid_on_streams(self, device: int=0, url: str="", estimate_pose :bool=False):
         """
         This function is called when class is executed, it runs the loop to read the video frame by frame,
         and displays the output frame with ids and poses.
@@ -264,7 +268,6 @@ class ObjectDetection:
         :param url: Takes a string containing the url along with the port to receive the stream.
         Example: url = "192.168.256.23:8080"
         This will be embedded into an http endpoint: "http://192.168.256.23:8080/video"
-
         :return: None
         """
         if url == "0":
@@ -272,7 +275,7 @@ class ObjectDetection:
         else:
             cap = cv2.VideoCapture()
             cap.open("http://{}/video".format(url))
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 5)
         assert cap.isOpened()
 
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -291,7 +294,7 @@ class ObjectDetection:
             assert ret
             
             #Reidentification inference running on frames of current device. Shares data with other device's inference thread for re-identification
-            frame_cnt = self.inference(device, frame, h, w, frame_cnt)
+            frame_cnt = self.inference(device, frame, h, w, frame_cnt, estimate_pose)
 
             cv2.imshow('Device: {}'.format(device), frame)
  
@@ -300,7 +303,7 @@ class ObjectDetection:
                 
         cap.release()
 
-    def __call__(self, p_urls: list=[]):
+    def __call__(self, p_urls: list=[], estimate_pose: bool=False):
         """
         This function is called when class is executed, it runs the loop to read the video streams frame by frame,
         and displays the frames with reidentified ids and bounding boxes.
@@ -310,7 +313,7 @@ class ObjectDetection:
         """
         threads = []
         for id, url in enumerate(p_urls):
-            t = threading.Thread(target=self._reid_on_streams, args=(id, url,))
+            t = threading.Thread(target=self._reid_on_streams, args=(id, url, estimate_pose,))
             threads.append(t)
             t.start()
         
